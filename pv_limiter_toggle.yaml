@@ -183,7 +183,7 @@ actions:
           "n": "{{ max( min(p_steer / step, n_max), 0)|round(0, 'ceil') }}"
         alias: Calculate power usage and limiter value
       - action: persistent_notification.create
-        enabled: true
+        enabled: false
         metadata: {}
         data:
           notification_id: test
