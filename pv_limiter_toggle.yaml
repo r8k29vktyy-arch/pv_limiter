@@ -1,0 +1,219 @@
+blueprint:
+  name: PV Export limit
+  domain: automation
+  author: Septillion
+  homeassistant:
+    min_version: "2024.6.0"
+  description: |
+    Blueprint to automatically limit the export of PV power.
+    
+    v1.0.3
+  input:
+    grid_section:
+      name: Grid
+      description: "At least one of the two inputs has to be used. Use both if you have a seperate sensor for import and for export which don't go negative. Only use a single input if you have a single sensor for both import and export. See description to determine which to use."
+      input:
+        grid_import:
+            selector:
+              entity:
+                filter:
+                  domain: sensor
+                  device_class: power
+            name: Grid import
+            description: |
+              `sensor [device_class: power] (optional)`
+              Entity which indicates the **import** power from the grid as a **positive** value. Or only use this input if you have a sensor that's positive for import en negative for export.
+            default: []
+        grid_export:
+          selector:
+            entity:
+              filter:
+                domain: sensor
+                device_class: power
+          name: Grid Export
+          description: |
+            `sensor [device_class: power] (optional)`
+            Entity which indicates the **export** power to the grid as a **positive** value. Or only use this input if you have a sensor that's negative for import en positive for export.
+          default: []
+    pv_section:
+      name: PV
+      input:
+        pv_max_power:
+          selector:
+            number:
+              min: 1
+              max: 999999999999999999
+              step: 1
+              mode: box
+              unit_of_measurement: W
+          name: PV max power
+          default: 3600
+          description: |
+            `>=1 (required)`
+            The maximum power (in Watt) the inverter can produce when no limit is set. Not to confuse with the Wp rating of the PV panels!
+        pv_power:
+          selector:
+            entity:
+              filter:
+                domain: sensor
+                device_class: power
+          name: PV power
+          description: |
+            `sensor [class: power] (required)`
+            Entity which indicates the current produced power of the PV inverter.
+        pv_power_limit:
+          selector:
+            entity:
+              filter:
+                domain:
+                  - number
+                  - input_number
+          name: PV power limit
+          description: |
+            `number | input_number (required)`
+            Entity to set the power limit of the inverter. Can be 0-100% or actual power value, as long as the attribute `max` is set to the correct value which corresponds with the max PV output of the inverter (set in \"PV max power\"). The blueprint will automatically scale accordingly.
+    automation_control:
+      name: Automation Control Toggle
+      description: "External toggle to start or stop the script. If off, the script shall do nothing."
+      selector:
+        entity:
+          filter:
+            domain:
+              - input_boolean
+              - switch
+    update_rate:
+        selector:
+          number:
+            min: 2
+            max: 3600
+            step: 1
+            unit_of_measurement: sec
+        name: Update rate
+        default: 10
+        description: |
+          `2 - 3600 (required, default: 10)`
+          Minimum time in seconds between two updates of the power limit of the inverter. Because most inverters will not instantaneously follow the limit, this will dampen it a bit.
+    power_setpoint:
+        selector:
+          number:
+            min: -15000
+            max: 15000
+            step: 1
+            unit_of_measurement: w
+            mode: box
+        name: Power setpoint
+        default: 0
+        description: |
+          `-15000 - 15000 (required, default: 0)`
+          Offset to the netto grid power (in Watt). A **negative** value will steer towards a netto export and a **positie** value towards a netto import. For example: a value of '-100' will try to keep a netto export of PV power to the grid of a 100W.
+variables:
+  grid_import: !input grid_import
+  grid_export: !input grid_export
+  pv_power: !input pv_power
+  pv_power_limit: !input pv_power_limit
+  pv_max_power: !input pv_max_power
+  update_rate: !input update_rate
+  power_setpoint: !input power_setpoint
+  automation_control: !input automation_control
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: !input grid_import
+    to: null
+  - trigger: state
+    entity_id: !input grid_export
+    to: null
+  - trigger: state
+    entity_id: !input automation_control
+    to: "on"
+  - event_type: automation_reloaded
+    id: automation_reloaded
+    trigger: event
+conditions:
+  - condition: state
+    entity_id: !input automation_control
+    state: "on"
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id:
+              - automation_reloaded
+          - condition: template
+            value_template: "{{ grid_import == [] and grid_export == [] }}"
+        sequence:
+          - action: persistent_notification.create
+            metadata: {}
+            data:
+              notification_id: septillion_pv_export_error
+              message: Grid import and grid export can't be both empty!
+    default:
+      - variables:
+          n_max: "{{ state_attr(pv_power_limit, 'max') }}"
+          step: "{{ pv_max_power / n_max }}"
+          p_import: >-
+            {% set e = grid_import %}
+            {% set d = pv_max_power %}
+            {% set u = { 'mW':1e-3, 'W':1, 'kW':1e3, 'MW':1e6, 'GW':1e9, 'TW':1e12 } %}
+            {% if e == [] %}
+              0
+            {% else %}
+              {% set p = states(e)|float(none) %}
+              {{ d if p is none else p * u[state_attr(e, 'unit_of_measurement')]|default(1) }}
+            {% endif %}
+          p_export: >-
+            {% set e = grid_export %}
+            {% set d = 0 %}
+            {% set u = { 'mW':1e-3, 'W':1, 'kW':1e3, 'MW':1e6, 'GW':1e9, 'TW':1e12 } %}
+            {% if e == [] %}
+              0
+            {% else %}
+              {% set p = states(e)|float(none) %}
+              {{ d if p is none else p * u[state_attr(e, 'unit_of_measurement')]|default(1) }}
+            {% endif %}
+          p_pv: >-
+            {% set e = pv_power %}
+            {% set d = 0 %}
+            {% set u = { 'mW':1e-3, 'W':1, 'kW':1e3, 'MW':1e6, 'GW':1e9, 'TW':1e12 } %}
+            {% set p = states(e)|float(none) %}
+            {{ d if p is none else p * u[state_attr(e, 'unit_of_measurement')]|default(1) }}
+          p_self: "{{ p_pv + p_import - p_export }}"
+          p_steer: "{{ p_self - power_setpoint }}"
+          "n": "{{ max( min(p_steer / step, n_max), 0)|round(0, 'ceil') }}"
+        alias: Calculate power usage and limiter value
+      - action: persistent_notification.create
+        enabled: true
+        metadata: {}
+        data:
+          notification_id: test
+          message: |
+            Import: {{ p_import }} ({{ grid_import}})
+            Export: {{ p_export }} ({{ grid_export}})
+            PV: {{ p_pv }} ({{ pv_power }})
+            PV max: {{ pv_max_power }}
+            PV step: {{ step }}
+            Self: {{ p_self }}
+            N: {{ n }}
+      - if:
+          - condition: template
+            value_template: "{{ has_value(pv_power_limit) }}"
+        then:
+          - action: "{{ pv_power_limit.split('.')[0] }}.set_value"
+            metadata: {}
+            data:
+              value: "{{ n }}"
+            target:
+              entity_id: "{{ pv_power_limit }}"
+            enabled: true
+      - delay:
+          hours: 0
+          minutes: 0
+          seconds: "{{ update_rate }}"
+          milliseconds: 0
+      - action: persistent_notification.create
+        enabled: false
+        metadata: {}
+        data:
+          message: done
+          notification_id: done
